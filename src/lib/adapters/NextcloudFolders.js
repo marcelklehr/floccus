@@ -8,6 +8,7 @@ import * as Basics from '../components/basics'
 import { Base64 } from 'js-base64'
 import AsyncLock from 'async-lock'
 import browser from '../browser-api'
+import { AuthManager, AuthSession } from '../AuthManager'
 
 const Parallel = require('async-parallel')
 const { h } = require('hyperapp')
@@ -39,6 +40,7 @@ export default class NextcloudFoldersAdapter extends Adapter {
     this.bookmarkLock = new AsyncLock()
     this.hasFeatureHashing = false
     this.hasFeatureExistanceCheck = false
+    this.authSession
   }
 
   static getDefaultValues() {
@@ -825,16 +827,30 @@ export default class NextcloudFoldersAdapter extends Adapter {
     })
   }
 
+  async onSyncStart() {
+    this.authSession = new AuthSession(this.server.url)
+    await this.authSession.initialize()
+  }
+
+  async onSyncComplete() {
+    this.authSession.destructor()
+  }
+
+  async onSyncFail() {
+    this.authSession.destructor()
+  }
+
   async sendRequest(verb, relUrl, type, body, returnRawResponse) {
     const url = this.normalizeServerURL(this.server.url) + relUrl
     let res
     let authString = Base64.encode(
       this.server.username + ':' + this.server.password
     )
+
     try {
       res = await this.fetchQueue.add(() =>
         Promise.race([
-          fetch(url, {
+          this.authSession.fetch(url, {
             method: verb,
             credentials: 'omit',
             headers: {
@@ -846,15 +862,17 @@ export default class NextcloudFoldersAdapter extends Adapter {
           new Promise((resolve, reject) =>
             setTimeout(() => {
               const e = new Error(browser.i18n.getMessage('Error016'))
-              e.pass = true
               reject(e)
             }, TIMEOUT)
           )
         ])
       )
     } catch (e) {
-      if (e.pass) throw e
-      throw new Error(browser.i18n.getMessage('Error017'))
+      if (e.fromFetch) {
+        throw new Error(browser.i18n.getMessage('Error017'))
+      } else {
+        throw e
+      }
     }
 
     if (returnRawResponse) {
